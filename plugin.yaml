@@ -1,7 +1,7 @@
 name: butler-push
 label: Butler Push
 kind: platform
-version: 1.0.1
+version: 1.0.2
 description: >
   Optional push notifications for Butler. Pair the app through the authenticated
   Hermes dashboard, then forward minimal event metadata and encrypted previews to
