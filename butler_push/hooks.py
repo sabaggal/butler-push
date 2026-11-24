@@ -20,6 +20,7 @@ from collections import OrderedDict
 from typing import Any, Callable, Optional
 
 from . import RELAY_URL_ENV, REPLY_PREVIEWS_ENV
+from .diagnostics import Outcome, trace
 from .keys import Keys, hermes_root, load_or_create_keys
 from .payload import assistant_excerpt, notify_event, preview, progress_event
 from .privacy import keyed_id
@@ -194,7 +195,10 @@ class ButlerPush:
         # Re-read at the last network boundary, not on Hermes' turn thread. A
         # cached URL or an already-queued event must not survive a live change.
         url = self._relay_url()
-        return bool(url and self._keys and target == notify_url(url, self._keys.install_key))
+        permitted = bool(url and self._keys and target == notify_url(url, self._keys.install_key))
+        if not permitted:
+            trace(Outcome.SEND_GUARD_REFUSED)
+        return permitted
 
     def _send(self, event: dict[str, Any], on_result: Optional[ResultFn] = None) -> bool:
         url = self._relay()
@@ -212,19 +216,25 @@ class ButlerPush:
         """Seal one banner. ``content`` is the ``preview`` fields besides the title, which is
         the bot's name and the kind's label; the name is only read when a banner goes out."""
         platform, source, is_subagent = self._session(session_id)
-        if not self._relay() or not should_notify(session_id, platform):
+        if not self._relay():
+            trace(Outcome.BANNER_RELAY_UNCONFIGURED)
+            return
+        if not should_notify(session_id, platform):
+            trace(Outcome.BANNER_FILTERED)
             return
         keys = self._keys_or_none()
         if keys is None:
+            trace(Outcome.BANNER_KEYS_UNAVAILABLE)
             return
         name = self._bot_name() or self._profile or "Hermes"
         label = TITLE_LABELS.get(kind)
         sealed = preview(title=f"{name} · {label}" if label else name, bot_name=name,
                          profile=self._profile, **content)
-        self._send(notify_event(
+        queued = self._send(notify_event(
             kind=kind, session_id=session_id, event_ref=event_ref, source=source, is_subagent=is_subagent,
             keys=keys, preview=sealed, now=self._now(),
-        ))
+        ), on_result=lambda _: trace(Outcome.BANNER_ACK))
+        trace(Outcome.BANNER_QUEUED if queued else Outcome.BANNER_NOT_QUEUED)
 
     # -- progress -------------------------------------------------------------------------
 
@@ -298,12 +308,15 @@ class ButlerPush:
 
     def pre_llm_call(self, *, session_id: str = "", platform: str = "", **_: Any) -> None:
         if not self._relay():
+            trace(Outcome.PRE_RELAY_UNCONFIGURED)
             return
         try:
             with self._lock:
                 self._remember_platform(session_id, platform)
                 self._reply_by_session.pop(session_id, None)
                 snapshot = self._progress.turn_started(session_id, self._now())
+                allowed = should_notify(session_id, self._session(session_id)[0])
+            trace(Outcome.PRE_ALLOWED if allowed else Outcome.PRE_FILTERED)
             self._emit_progress(snapshot)
         except Exception:
             logger.warning("butler-push: pre_llm_call failed")
@@ -311,14 +324,17 @@ class ButlerPush:
     def post_llm_call(self, *, session_id: str = "", assistant_response: Any = "",
                       platform: str = "", **_: Any) -> None:
         if not self._relay():
+            trace(Outcome.POST_RELAY_UNCONFIGURED)
             return
         try:
             with self._lock:
                 self._remember_platform(session_id, platform)
-                if should_notify(session_id, self._session(session_id)[0]):
+                allowed = should_notify(session_id, self._session(session_id)[0])
+                if allowed:
                     # Never retain the user message. Store only a small optional assistant excerpt.
                     reply = assistant_excerpt(assistant_response) if self._reply_previews() else ""
                     self._reply_by_session.remember(session_id, reply)
+            trace(Outcome.POST_CAPTURED if allowed else Outcome.POST_FILTERED)
         except Exception:
             logger.warning("butler-push: post_llm_call failed")
 
@@ -331,11 +347,18 @@ class ButlerPush:
                 snapshot = self._progress.turn_ended(session_id, self._now(), failed=bool(failed))
             self._emit_progress(snapshot)
             if interrupted:
+                trace(Outcome.END_INTERRUPTED)
                 return
             ref = turn_id or str(int(self._now()))
             if failed:
+                trace(Outcome.END_FAILED)
                 self._notify("turn_error", session_id, ref, body="")
-            elif completed and captured is not None:
+            elif not completed:
+                trace(Outcome.END_INCOMPLETE)
+            elif captured is None:
+                trace(Outcome.END_COMPLETED_NO_CAPTURE)
+            else:
+                trace(Outcome.END_COMPLETED_CAPTURED)
                 self._notify("reply", session_id, ref, body=captured if self._reply_previews() else "")
         except Exception:
             logger.warning("butler-push: on_session_end failed; a push was dropped")

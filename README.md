@@ -110,3 +110,11 @@ hermes plugins doctor . --ci
 
 The suite uses a synthetic relay and keys: it does not contact APNs or any
 real host. See [NOTICE](NOTICE) for the precise upstream baseline.
+
+For a temporary hook trace, set `BUTLER_PUSH_DIAGNOSTICS=1` in the Hermes
+process environment and collect the `butler-push hook outcome=` INFO lines.
+The trace contains fixed outcome labels only, at most one of each label per
+five seconds per process. It intentionally does not identify a specific chat,
+profile, person, relay, token, or message. A relay acknowledgment does not
+mean Apple accepted a banner or that it displayed on a device. Remove the
+setting to return to normal logging.
