@@ -1,0 +1,10 @@
+{
+  "name": "butler-push",
+  "label": "Butler Push",
+  "description": "Authenticated pairing for the Butler app. No dashboard tab.",
+  "icon": "Smartphone",
+  "version": "1.0.0",
+  "tab": { "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

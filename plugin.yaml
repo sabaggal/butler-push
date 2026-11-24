@@ -1,0 +1,27 @@
+name: butler-push
+label: Butler Push
+kind: platform
+version: 1.0.0
+description: >
+  Optional push notifications for Butler. Pair the app through the authenticated
+  Hermes dashboard, then forward minimal event metadata and encrypted previews to
+  a single relay that the host administrator chooses. No default relay.
+author: Gal Sabag
+license: MIT
+requires_hermes: ">=0.23.0"
+requires_env:
+  - name: BUTLER_PUSH_RELAY_URL
+    description: "Private Butler relay base URL (HTTPS; no credentials or query string)"
+    prompt: "Butler push relay URL"
+    password: false
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+  - on_session_end
+  - pre_tool_call
+  - post_tool_call
+  - pre_approval_request
+  - post_approval_response
+  - subagent_start
+python_dependencies:
+  - "cryptography>=42,<51"

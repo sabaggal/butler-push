@@ -1,0 +1,12 @@
+Butler Push for Hermes, version 1.0.0.
+
+Based on the MIT-licensed Hermex Push plugin by Uzair Ansar:
+https://github.com/uzairansaruzi/hermex-push
+Upstream source revision: 2da6f660bb86e9470ea56c85dc554aba45ce7fdf
+
+Reuse includes the notification lifecycle/coalescer, relay sender, payload
+encoding, preview encryption/AAD, plugin entry/adapter, profile dispatch,
+dashboard API shapes and selected tests, adapted for Butler. The original MIT
+license and copyright notice remain in LICENSE. Butler implements independent
+configuration and key storage, reduced outgoing data and a push-only API; the
+original relay and unrelated companion tools are not included in this package.

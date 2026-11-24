@@ -1,0 +1,172 @@
+"""Background delivery to the relay. Hooks run on the agent's turn path, so they only enqueue;
+one daemon thread POSTs with a short timeout and a single retry (none for progress the next
+update replaces). Nothing is persisted: a push that cannot be delivered within seconds is stale
+anyway."""
+
+from __future__ import annotations
+
+import json
+import logging
+import queue
+import threading
+import time
+import urllib.error
+import urllib.request
+from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
+
+from . import PLUGIN_VERSION
+
+logger = logging.getLogger("butler_push")
+
+QUEUE_LIMIT = 256
+TIMEOUT_SECONDS = 10.0
+RETRY_DELAY_SECONDS = 2.0
+RESULT_BODY_LIMIT = 4096  # the relay answers {"result": "<word>"}
+
+PostFn = Callable[[str, bytes], tuple[int, str]]  # (url, body) -> (HTTP status, relay result)
+ResultFn = Callable[[str], None]
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_STOP = object()
+
+
+def allowed_relay_url(url: str) -> bool:
+    """https anywhere, or http to loopback only: the install key travels in the URL path."""
+    if not url or any(ch.isspace() or ord(ch) < 32 or ch == "\\" for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        if (not parts.hostname or parts.username is not None or parts.password is not None
+                or parts.query or parts.fragment or parts.port == 0 or "?" in url or "#" in url):
+            return False
+        if parts.scheme == "https":
+            return True
+        return parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS
+    except ValueError:
+        return False
+
+
+def notify_url(relay_url: str, install_key: str) -> str:
+    return f"{relay_url.rstrip('/')}/installs/{install_key}/notify"
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would replay the install key to whatever host the relay names; refuse."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _result(raw: bytes) -> str:
+    """The relay's ``result`` word, or ``""`` for a body that is not the relay's JSON."""
+    try:
+        result = json.loads(raw).get("result")
+    except (ValueError, AttributeError):
+        return ""
+    return result if isinstance(result, str) else ""
+
+
+def _urllib_post(url: str, body: bytes) -> tuple[int, str]:
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": f"butler-push-plugin/{PLUGIN_VERSION}"},
+    )
+    try:
+        with _opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+            return response.status, _result(response.read(RESULT_BODY_LIMIT))
+    except urllib.error.HTTPError as exc:
+        return exc.code, ""
+
+
+class RelaySender:
+    """Queue of relay-bound events drained by one daemon thread."""
+
+    def __init__(self, post: PostFn = _urllib_post, *, sleep: Callable[[float], None] = time.sleep,
+                 permit: Optional[Callable[[str], bool]] = None) -> None:
+        self._post = post
+        self._sleep = sleep
+        self._permit = permit
+        self._queue: "queue.Queue[Any]" = queue.Queue(maxsize=QUEUE_LIMIT)
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def enqueue(self, url: str, event: dict[str, Any], on_result: Optional[ResultFn] = None) -> bool:
+        """Queue one event; ``on_result`` gets the relay's ``result`` on the drain thread after a
+        2xx, and is never called when delivery fails."""
+        try:
+            self._queue.put_nowait((url, event, on_result))
+        except queue.Full:
+            logger.warning("butler-push: relay queue full; dropping a %s event", event.get("kind"))
+            return False
+        self._ensure_thread()
+        return True
+
+    def _ensure_thread(self) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._drain, name="butler-push-relay", daemon=True)
+                self._thread.start()
+
+    def close(self) -> None:
+        """Stop the drain thread after the queued events; safe to call more than once."""
+        with self._lock:
+            thread = self._thread
+        if thread is None or not thread.is_alive():
+            return
+        self._queue.put(_STOP)
+        thread.join(timeout=TIMEOUT_SECONDS)
+
+    def _drain(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is _STOP:
+                self._queue.task_done()
+                return
+            url, event, on_result = item
+            try:
+                self.deliver(url, event, on_result)
+            except Exception:
+                logger.debug("butler-push: relay delivery raised")
+            finally:
+                self._queue.task_done()
+
+    def deliver(self, url: str, event: dict[str, Any], on_result: Optional[ResultFn] = None) -> bool:
+        """Synchronous POST with one retry on a network error or 5xx. Progress gets no retry: it
+        would double traffic during a relay outage to resend a state the next update replaces.
+        The turn's last progress (``done`` / ``failed``) keeps it: nothing follows to replace it,
+        and the relay withholds the reply banner while the activity it ends still runs.
+        A 2xx hands the relay's ``result`` to ``on_result``. Never logs the body."""
+        body = json.dumps(event, separators=(",", ":")).encode("utf-8")
+        replaceable = event.get("kind") == "progress" and event.get("status") not in ("done", "failed")
+        attempts = 1 if replaceable else 2
+        for attempt in range(1, attempts + 1):
+            if self._permit is not None and not self._permit(url):
+                return False
+            try:
+                status, result = self._post(url, body)
+            except Exception as exc:
+                status, result, reason = 0, "", type(exc).__name__
+            else:
+                reason = f"HTTP {status}"
+            if 200 <= status < 300:
+                if on_result is not None:
+                    on_result(result)
+                return True
+            if status and status < 500:
+                logger.warning("butler-push: relay rejected a %s event (%s)", event.get("kind"), reason)
+                return False
+            if attempt < attempts:
+                self._sleep(RETRY_DELAY_SECONDS)
+        logger.warning("butler-push: relay unreachable for a %s event (%s)", event.get("kind"), reason)
+        return False
+
+    def wait_idle(self, timeout: float = 5.0) -> None:
+        """Test helper: block until the queue drains."""
+        deadline = time.monotonic() + timeout
+        while not self._queue.empty() or self._queue.unfinished_tasks:
+            if time.monotonic() > deadline:
+                raise TimeoutError("relay queue did not drain")
+            time.sleep(0.01)
