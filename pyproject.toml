@@ -1,6 +1,6 @@
 [project]
 name = "butler-push"
-version = "1.0.2"
+version = "1.0.3"
 description = "Optional push notifications for Butler"
 requires-python = ">=3.10"
 dependencies = ["cryptography>=42,<51"]

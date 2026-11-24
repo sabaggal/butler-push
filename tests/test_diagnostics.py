@@ -31,11 +31,12 @@ def make_push(keys, sender):
 
 
 @pytest.mark.parametrize("profile", ["default", "named-profile"])
-def test_hermes_gui_desktop_turn_reaches_the_sender(make_push, profile, sender, keys, monkeypatch, caplog):
+@pytest.mark.parametrize("platform", ["desktop", "gui"])
+def test_hermes_gui_desktop_turn_reaches_the_sender(make_push, profile, platform, sender, keys, monkeypatch, caplog):
     monkeypatch.setenv("BUTLER_PUSH_DIAGNOSTICS", "1")
     monkeypatch.setattr(diagnostics, "_last", {})
     caplog.set_level(logging.INFO, logger="butler_push")
-    _turn(make_push(profile))
+    _turn(make_push(profile), platform=platform)
     assert [evt["kind"] for _, evt in sender.events] == ["progress", "progress", "reply"]
     reply = sender.events[-1][1]
     assert reply["source"] == "bot"
@@ -62,7 +63,7 @@ def test_opt_in_and_no_repeat_within_interval(make_push, sender, monkeypatch, ca
     assert sum(evt["kind"] == "reply" for _, evt in sender.events) == 1
 
 
-@pytest.mark.parametrize("platform", ["local", "cli"])
+@pytest.mark.parametrize("platform", ["local", "cli", "api", "api_server", "tool", "webhook", "telegram"])
 def test_direct_websocket_storage_and_terminal_labels_still_fail_closed(
         platform, make_push, sender, monkeypatch, caplog):
     monkeypatch.setenv("BUTLER_PUSH_DIAGNOSTICS", "1")

@@ -1,6 +1,8 @@
 """Only known first-party conversation origins may emit a push."""
 
-BOT_PLATFORMS = frozenset({"ios", "desktop", "tui", "butler"})
+# Classic Hermes dashboard RPC preserves the native clients’ explicit "gui" label;
+# the canonical gateway maps the same source to "desktop". Both are user-facing.
+BOT_PLATFORMS = frozenset({"ios", "desktop", "gui", "tui", "butler"})
 WEBUI_PLATFORMS = frozenset({"webui"})
 GROUP_PLATFORMS = frozenset({"bot_room"})
 ALLOWED_PLATFORMS = BOT_PLATFORMS | WEBUI_PLATFORMS | GROUP_PLATFORMS
