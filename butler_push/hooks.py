@@ -220,7 +220,7 @@ class ButlerPush:
         name = self._bot_name() or self._profile or "Hermes"
         label = TITLE_LABELS.get(kind)
         sealed = preview(title=f"{name} · {label}" if label else name, bot_name=name,
-                         profile=self._profile, markdown=False, **content)
+                         profile=self._profile, **content)
         self._send(notify_event(
             kind=kind, session_id=session_id, event_ref=event_ref, source=source, is_subagent=is_subagent,
             keys=keys, preview=sealed, now=self._now(),

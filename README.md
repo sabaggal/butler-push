@@ -82,7 +82,7 @@ users, commands, tool arguments/results, or approval/question content. An
 AES‑256‑GCM envelope protects bot identity and request-routing fields. Assistant
 reply text is off by default. If you specifically want assistant reply previews,
 set `BUTLER_PUSH_REPLY_PREVIEWS=1` in the root Hermes environment; only a short
-assistant reply excerpt is encrypted on the host and can be opened by the
+plain-text assistant excerpt is encrypted on the host and can be opened by the
 paired device. Your relay operator can see the unencrypted routing metadata
 and device registrations, but cannot decrypt this preview. The receiver may
 independently disable previews. No data goes to the upstream Hermex relay.

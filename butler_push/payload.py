@@ -25,7 +25,6 @@ It never carries tool arguments or results, only the tool's name.
 
 from __future__ import annotations
 
-import re
 import time
 from typing import Any, Optional
 
@@ -39,89 +38,28 @@ PROGRESS_STATUSES = frozenset({"running", "waiting", "done", "failed"})
 TITLE_CHARS = 80
 SUBTITLE_CHARS = 120
 BODY_CHARS = 400
-# Only a text's head is flattened, and the rest is dropped rather than shown raw: unpaired
-# delimiters on one long line make the scan quadratic, and no banner shows more than a few
-# hundred characters. The head is long enough for markup-heavy openings (long link URLs).
-FLATTEN_CHARS = 8000
+# Bound the amount of response text inspected independently of the banner limit.
+EXCERPT_INPUT_CHARS = 8000
 
 
-def _as_text(value: Any) -> str:
-    """Hook payloads are not always strings: a multimodal user message is a list of parts."""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return " ".join(
-            _as_text(part.get("text") if isinstance(part, dict) else part) for part in value
-            if not isinstance(part, dict) or part.get("type", "text") == "text"
-        )
-    if isinstance(value, dict):
-        return _as_text(value.get("text") or value.get("content") or "")
-    return "" if value is None else str(value)
-
-
-# Code is stashed behind NUL-delimited indexes first so its content stays verbatim: a fenced
-# block (closed, or running to the end of the text) or a one-line span between equal backtick runs.
-_CODE = re.compile(
-    r"^[ \t]*(?P<fence>`{3,}|~{3,})[^`\n]*\n(?P<block>.*?)(?:^[ \t]*(?P=fence)[`~]*[ \t]*$|\Z)"
-    r"|(?<!`)(?P<ticks>`+)(?!`)(?P<span>[^\n]+?)(?<!`)(?P=ticks)(?!`)",
-    re.M | re.S,
-)
-_STASHED = re.compile(r"\x00(\d+)\x00")
-
-# Applied in order to the text around the code. Block markers only count at a line start, so
-# this runs while the newlines are still there. Emphasis follows CommonMark flanking: an opener
-# is followed by non-space, a closer preceded by non-space (so ``2 * 3 * 4`` stays), a ``*``
-# between a word and punctuation is literal (so ``2*(n-1)*k`` and ``f(*args)`` stay), and ``_``
-# never opens or closes inside a word (so ``snake_case_name`` stays).
-_MARKDOWN = [
-    (re.compile(r"^[ \t]*(?:>[ \t]?)+", re.M), ""),  # blockquote markers
-    (re.compile(r"^[ \t]*([-*_])(?:[ \t]*\1){2,}[ \t]*$", re.M), ""),  # thematic breaks
-    (re.compile(r"^[ \t]*#{1,6}[ \t]+", re.M), ""),  # heading markers; `C#` and `#tag` stay
-    (re.compile(r"^[ \t]*[-*+][ \t]+", re.M), ""),  # list bullets
-    (re.compile(r"!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)"), r"\1"),  # links and images
-    # The `*` rules match the literal before checking flanking, so a long line of unpaired
-    # asterisks stays cheap to scan.
-    (re.compile(r"\*\*(?:(?<![\w*]\*\*)(?=\S)|(?<=\w\*\*)(?=\w))(.+?)"
-                r"\*\*(?<=\S\*\*)(?:(?![\w*])|(?<=\w\*\*)(?=\w))"), r"\1"),
-    (re.compile(r"(?<!\w)__(?!\s)(.+?)(?<!\s)__(?!\w)"), r"\1"),
-    (re.compile(r"(?<!~)~~(?!\s)(.+?)(?<!\s)~~(?!~)"), r"\1"),
-    (re.compile(r"\*(?:(?<![\w*]\*)(?=[^\s*])|(?<=\w\*)(?=\w))(.+?)"
-                r"\*(?<=[^\s*]\*)(?:(?![\w*])|(?<=\w\*)(?=\w))"), r"\1"),
-    (re.compile(r"(?<!\w)_(?![\s_])(.+?)(?<![\s_])_(?!\w)"), r"\1"),
-]
-
-
-def _plain(text: str) -> str:
-    """Markdown to the plain text a banner can show: the syntax goes, the words stay."""
-    code: list[str] = []
-
-    def stash(match: re.Match[str]) -> str:
-        code.append(match["block"] if match["fence"] else match["span"])
-        return f"\x00{len(code) - 1}\x00"
-
-    text = _CODE.sub(stash, text.replace("\x00", ""))
-    for pattern, replacement in _MARKDOWN:
-        text = pattern.sub(replacement, text)
-    return _STASHED.sub(lambda match: code[int(match[1])], text)
-
-
-def _clip(text: Any, limit: int, *, markdown: bool) -> str:
-    """Flatten first, then collapse whitespace and clip, so the budget is spent on words."""
-    text = _as_text(text)
-    if markdown:
-        text = _plain(text[:FLATTEN_CHARS])
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+def _clip(value: Any, limit: int) -> str:
+    """Plain text only: no interpretation of code snippets or Markdown delimiters."""
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value[:EXCERPT_INPUT_CHARS].replace("\x00", "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1].rstrip() + "…"
 
 
 def assistant_excerpt(value: Any) -> str:
     """Only supported textual assistant output can be retained for an optional preview."""
     if isinstance(value, str):
-        return _clip(value, BODY_CHARS, markdown=True)
+        return _clip(value, BODY_CHARS)
     # Read at most the head of a multimodal answer, and never stringify unknown tool payloads.
     parts = value if isinstance(value, list) else []
     text: list[str] = []
-    budget = FLATTEN_CHARS
+    budget = EXCERPT_INPUT_CHARS
     for part in parts[:32]:
         if isinstance(part, dict) and part.get("type", "text") == "text":
             part = part.get("text")
@@ -130,27 +68,23 @@ def assistant_excerpt(value: Any) -> str:
             budget -= len(text[-1])
         if budget <= 0:
             break
-    return _clip(" ".join(text), BODY_CHARS, markdown=True)
+    return _clip(" ".join(text), BODY_CHARS)
 
 
 def preview(*, title: Any, body: Any, profile: str, subtitle: Any = "", request_id: str = "",
-            bot_name: Any = "", markdown: bool = True) -> dict[str, str]:
-    """The sealed banner content. iOS banners render plain text, so the subtitle and body are
-    flattened from markdown before sealing; ``markdown=False`` leaves text that is not markdown,
-    like a shell command, unflattened. The title (the bot's name and a fixed label) and the bot's
-    name are never markdown, and an empty name is left out."""
+            bot_name: Any = "") -> dict[str, str]:
+    """Bounded plain text and encrypted routing metadata for the paired app."""
     content = {
-        "title": _clip(title, TITLE_CHARS, markdown=False),
-        "subtitle": _clip(subtitle, SUBTITLE_CHARS, markdown=markdown),
-        "body": _clip(body, BODY_CHARS, markdown=markdown),
+        "title": _clip(title, TITLE_CHARS),
+        "subtitle": _clip(subtitle, SUBTITLE_CHARS),
+        "body": _clip(body, BODY_CHARS),
         "profile": profile,
         "request_id": request_id,
     }
-    name = _clip(bot_name, TITLE_CHARS, markdown=False)
+    name = _clip(bot_name, TITLE_CHARS)
     if name:
         content["bot_name"] = name
     return content
-
 
 def _identity(keys: Keys, kind: str, session_id: str, event_ref: str) -> dict[str, str]:
     return {

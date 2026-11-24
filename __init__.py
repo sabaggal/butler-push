@@ -31,7 +31,6 @@ def register(ctx) -> None:
     ctx.register_platform(
         name=PLATFORM_NAME, label="Butler Push", adapter_factory=make_adapter, check_fn=check_requirements,
         is_connected=is_connected, required_env=[RELAY_URL_ENV],
-        install_hint="pip install cryptography   # already a Hermes dependency",
         env_enablement_fn=env_enablement, emoji="📱", pii_safe=True,
     )
     profile = ""

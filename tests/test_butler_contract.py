@@ -97,7 +97,7 @@ def _perform_turn(push, platform="ios"):
                               command="command-secret", description="description-secret")
     push.pre_tool_call(**context, tool_name="clarify", tool_call_id="question-42",
                        args={"question": "question-secret"})
-    push.post_llm_call(**context, user_message="user-secret", assistant_response="**assistant-secret**")
+    push.post_llm_call(**context, user_message="user-secret", assistant_response="assistant-secret")
     push.on_session_end(**context, completed=True, turn_id="turn-42")
 
 
